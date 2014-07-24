@@ -30,11 +30,14 @@ struct
         | _ -> failwith "bad op"
 
   let sockaddr s =
+    let open Unix in
     try
-      let host, port = String.split ~by:":" s in
-        Unix.ADDR_INET (Unix.inet_addr_of_string host, int_of_string port)
+      let host, service = String.split ~by:":" s in
+      match getaddrinfo host service [] with
+      | [] -> raise (Invalid_argument "getaddrinfo returned no results")
+      | h::_ -> h.ai_addr
     with Not_found ->
-      Unix.ADDR_UNIX s
+      ADDR_UNIX s
 
   let node_sockaddr s = String.split ~by:"," s |> fst |> sockaddr
   let app_sockaddr  s =
