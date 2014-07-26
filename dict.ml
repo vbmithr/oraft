@@ -4,6 +4,10 @@ open Lwt
 module String  = BatString
 module Hashtbl = BatHashtbl
 
+let section = Lwt_log.Section.make "dict"
+
+let ipv6addr = Re_pcre.regexp "\\[(.*)\\]:([0-9]*)%?(.*)?"
+
 type op =
     Get of string
   | Wait of string
@@ -31,13 +35,27 @@ struct
 
   let sockaddr s =
     let open Unix in
+    (* Identify the type of address *)
+    if Re.execp ipv6addr s
+    then (* IPv6 address *)
+      match
+        Re.(exec ipv6addr s |> get_all)
+      with
+      | [|_;host;port;""|] ->
+        ADDR_INET (inet_addr_of_string host, int_of_string port), None
+      | [|_;host;port;zone|] ->
+        ADDR_INET (inet_addr_of_string host, int_of_string port), Some zone
+      | _ ->
+        raise (Invalid_argument "invalid IPv6 address")
+    else (* not an IPv6 address *)
     try
       let host, service = String.split ~by:":" s in
       match getaddrinfo host service [] with
       | [] -> raise (Invalid_argument "getaddrinfo returned no results")
-      | h::_ -> h.ai_addr
+      | h::_ -> h.ai_addr, None
     with Not_found ->
-      ADDR_UNIX s
+      Lwt_log.ign_warning_f ~section "Using UNIX domain socket %s" s;
+      ADDR_UNIX s, None
 
   let node_sockaddr s = String.split ~by:"," s |> fst |> sockaddr
   let app_sockaddr  s =
@@ -118,6 +136,7 @@ let wr_benchmark ?(iterations = 10_000) ~addr () =
 
 let mode         = ref `Help
 let cluster_addr = ref None
+let mcast_addr   = ref None
 let k            = ref None
 let v            = ref None
 let ro_bm_iters  = ref 0
@@ -127,9 +146,11 @@ let specs =
   Arg.align
     [
       "-master", Arg.String (fun n -> mode := `Master n),
-        "ADDR Launch master at given address";
+        "ADDR Launch master at given address (<node_addr>:<node_port>,<app_addr:app_port>)";
       "-join", Arg.String (fun p -> cluster_addr := Some p),
-        "ADDR Join cluster at given address";
+        "ADDR Join cluster at given address (<node_addr>:<node_port>,<app_addr:app_port>)";
+      "-mcast", Arg.String (fun p -> mcast_addr := Some p),
+        "ADDR Join mcast group at given address (<mcast_addr>:<port>%<iface>)";
       "-client", Arg.String (fun addr -> mode := `Client addr), "ADDR Client mode";
       "-key", Arg.String (fun s -> k := Some s), "STRING Wait for key/set it";
       "-value", Arg.String (fun s -> v := Some s),
@@ -148,7 +169,30 @@ let () =
   match !mode with
       `Help -> usage ()
     | `Master addr ->
-        Lwt_unix.run (run_server ~addr ?join:!cluster_addr ~id:addr ())
+      (match !mcast_addr with
+       | None -> Lwt_main.run (run_server ~addr ?join:!cluster_addr ~id:addr ())
+       | Some mcast_addr ->
+         if not (Re.execp ipv6addr mcast_addr) then
+           raise (Invalid_argument "Invalid multicast address");
+         match Re.(exec ipv6addr mcast_addr |> get_all) with
+         | [|_;v6addr;port;iface|] ->
+           let port = int_of_string port in
+           let main_thread () =
+             Llnet.connect ~iface (Ipaddr.V6.of_string_exn v6addr) port >>= fun h ->
+             Llnet.neighbours h >>= function
+             | [] -> raise_lwt (Failure "invariant do not hold")
+             | sa::t ->
+               match sa with
+               | ADDR_UNIX _ -> raise_lwt (Failure "invariant do not hold")
+               | ADDR_INET (a, p) ->
+                 let cluster_addr =
+                   Printf.sprintf "[%s]:%d%%%s"
+                     (Unix.string_of_inet_addr a) p iface in
+                 run_server ~addr ?join:(Some cluster_addr) ~id:addr ()
+           in Lwt_main.run (main_thread ())
+         | _ -> failwith "Invalid multicast address: zone id missing"
+
+      )
     | `Client addr ->
         printf "Launching client %d\n" (Unix.getpid ());
         if !ro_bm_iters > 0 then

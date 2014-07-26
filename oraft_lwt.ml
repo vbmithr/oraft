@@ -852,7 +852,7 @@ struct
       | None -> (* we must connect ourselves *)
           try_lwt
             Lwt_log.info_f ~section "Connecting to %S" addr >>
-            lwt fd, ich, och = open_connection (C.node_sockaddr addr) in
+            lwt fd, ich, och = open_connection (C.node_sockaddr addr |> fst) in
               try_lwt
                 (try Lwt_unix.setsockopt fd Unix.TCP_NODELAY true with _ -> ());
                 (try Lwt_unix.setsockopt fd Unix.SO_KEEPALIVE true with _ -> ());

@@ -11,7 +11,7 @@ type config_change =
 module type CONF =
 sig
   include Oraft_lwt.SERVER_CONF
-  val app_sockaddr : address -> Unix.sockaddr
+  val app_sockaddr : address -> Unix.sockaddr * string option
 end
 
 module Make_client : functor (C : CONF) ->
