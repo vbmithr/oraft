@@ -57,7 +57,7 @@ type config_change =
 module type CONF =
 sig
   include Oraft_lwt.SERVER_CONF
-  val app_sockaddr : address -> Unix.sockaddr * string option
+  val app_sockaddr : address -> Unix.sockaddr
 end
 
 module Make_client(C : CONF) =
@@ -102,7 +102,7 @@ struct
 
   let connect t peer_id addr =
     let do_connect () =
-      lwt fd, ich, och = Oraft_lwt.open_connection (C.app_sockaddr addr |> fst) in
+      lwt fd, ich, och = Oraft_lwt.open_connection (C.app_sockaddr addr) in
       let out_buf      = MB.create () in
       let in_buf       = ref "" in
       let conn         = { addr; ich; och; in_buf; out_buf } in
@@ -260,8 +260,8 @@ struct
           let state         = Oraft.Core.make
                                 ~id ~current_term:0L ~voted_for:None
                                 ~log:[] ~config () in
-          let node_sockaddr = C.node_sockaddr addr |> fst in
-          let app_sockaddr  = C.app_sockaddr addr |> fst in
+          let node_sockaddr = C.node_sockaddr addr in
+          let app_sockaddr  = C.app_sockaddr addr in
           let conn_mgr      = SS.make_conn_manager ~id node_sockaddr in
           let serv          = SS.make exec ?election_period ?heartbeat_period
                                 state conn_mgr
@@ -279,8 +279,8 @@ struct
             let state         = Oraft.Core.make
                                   ~id ~current_term:0L ~voted_for:None
                                   ~log:[] ~config () in
-            let node_sockaddr = C.node_sockaddr addr |> fst in
-            let app_sockaddr  = C.app_sockaddr addr |> fst in
+            let node_sockaddr = C.node_sockaddr addr in
+            let app_sockaddr  = C.app_sockaddr addr in
             let conn_mgr      = SS.make_conn_manager ~id node_sockaddr in
             let serv          = SS.make exec ?election_period
                                   ?heartbeat_period state conn_mgr
