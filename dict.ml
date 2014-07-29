@@ -157,6 +157,8 @@ let specs =
         "STRING Set key given in -key to STRING";
       "-ro_bm", Arg.Set_int ro_bm_iters, "N Run RO benchmark (N iterations)";
       "-wr_bm", Arg.Set_int wr_bm_iters, "N Run WR benchmark (N iterations)";
+      "-v", Unit (fun () -> Lwt_log.(add_rule "*" Info)), " Be verbose";
+      "-vv", Unit (fun () -> Lwt_log.(add_rule "*" Debug)), " Be more verbose"
     ]
 
 let usage () =
@@ -195,8 +197,11 @@ let () =
                ~tcp_reactor:return_oraft_ports
                ~iface (Ipaddr.of_string_exn v6addr) port >>= fun h ->
              (* Waiting for other peers to manifest themselves *)
+             Lwt_log.info "Detecting peers..." >>= fun () ->
              Lwt_unix.sleep 2. >>= fun () ->
-             if Llnet.SaddrMap.cardinal h.peers = 1 then
+             Llnet.SaddrMap.cardinal h.peers |> fun nb_peers_detected ->
+             Lwt_log.info_f "%d peers found" nb_peers_detected >>= fun () ->
+             if nb_peers_detected = 1 then
                (* We are alone, run server without joining a cluster *)
                run_server ~addr ?join:!cluster_addr ~id:addr ()
              else
@@ -233,7 +238,7 @@ let () =
                            (Unix.string_of_inet_addr a) remote_node_port
                            (Unix.string_of_inet_addr a) remote_app_port
                      in
-                     Lwt_log.ign_notice_f "Connecting to peer at %s" cluster_addr;
+                     Lwt_log.ign_info_f "Connecting to peer at %s" cluster_addr;
                      run_server ~addr ?join:(Some cluster_addr) ~id:addr ()
                  in
                  Lwt_list.iter_s inner n
