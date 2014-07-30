@@ -142,6 +142,8 @@ let v            = ref None
 let ro_bm_iters  = ref 0
 let wr_bm_iters  = ref 0
 
+let initialized  = ref false
+
 let specs =
   Arg.align
     [
@@ -157,13 +159,52 @@ let specs =
         "STRING Set key given in -key to STRING";
       "-ro_bm", Arg.Set_int ro_bm_iters, "N Run RO benchmark (N iterations)";
       "-wr_bm", Arg.Set_int wr_bm_iters, "N Run WR benchmark (N iterations)";
-      "-v", Unit (fun () -> Lwt_log.(add_rule "*" Info)), " Be verbose";
-      "-vv", Unit (fun () -> Lwt_log.(add_rule "*" Debug)), " Be more verbose"
+      "-v", Unit (fun () -> Lwt_log.(add_rule "dict" Info)), " Be verbose";
+      "-vv", Unit (fun () -> Lwt_log.(add_rule "dict" Debug)), " Be more verbose"
     ]
 
 let usage () =
   print_endline (Arg.usage_string specs "Usage:");
   exit 1
+
+let set_template () =
+  let template = "$(date).$(milliseconds) [$(pid)]: $(message)" in
+  let std_logger =
+    Lwt_log.channel ~template ~close_mode:`Keep ~channel:Lwt_io.stdout () in
+  Lwt_log.default := std_logger
+
+let () = set_template ()
+
+let get_peer_info = function
+  | Unix.ADDR_UNIX _ -> raise_lwt (Invalid_argument "get_peer_info")
+  | Unix.ADDR_INET (a, p) as sa ->
+    (* Found one neighbour, asking his oraft node port *)
+    let sa_domain = Unix.domain_of_sockaddr sa in
+    let s = Lwt_unix.(socket sa_domain SOCK_STREAM 0) in
+    Lwt_unix.connect s sa >>= fun () ->
+    let buf = String.make 5 '\000' in
+    Lwt_unix.recv s buf 0 5 [] >>= fun nb_recv ->
+    if nb_recv <> 5
+    then raise_lwt (Failure "get_peer_info: failed to obtain info")
+    else
+      let remote_node_port = EndianString.BigEndian.get_int16 buf 0 in
+      let remote_app_port = EndianString.BigEndian.get_int16 buf 2 in
+      let uint16_of_int16 i16 = if i16 < 0 then i16 + 65535 else i16 in
+      let remote_node_port = uint16_of_int16 remote_node_port in
+      let remote_app_port = uint16_of_int16 remote_app_port in
+      let cluster_addr =
+        match sa_domain with
+        | Unix.PF_UNIX -> assert false
+        | Unix.PF_INET ->
+          Printf.sprintf "%s:%d,%s:%d"
+            (Unix.string_of_inet_addr a) remote_node_port
+            (Unix.string_of_inet_addr a) remote_app_port
+        | Unix.PF_INET6 ->
+          Printf.sprintf "[%s]:%d,[%s]:%d"
+            (Unix.string_of_inet_addr a) remote_node_port
+            (Unix.string_of_inet_addr a) remote_app_port
+      in
+      Lwt.return (cluster_addr, (buf.[4] <> '\000'))
 
 let () =
   ignore (Sys.set_signal Sys.sigpipe Sys.Signal_ignore);
@@ -184,64 +225,71 @@ let () =
          match Re.(exec ipv6addr mcast_addr |> get_all) with
          | [|_;v6addr;port;iface|] ->
            let port = int_of_string port in
-           let return_oraft_ports _ fd _ =
-             let buf = String.make 4 '\000' in
+           let return_oraft_ports _ fd saddr =
+             let buf = String.make 5 '\000' in
              EndianString.BigEndian.set_int16 buf 0 (fst my_ports);
              EndianString.BigEndian.set_int16 buf 2 (snd my_ports);
-             Lwt_unix.send fd buf 0 4 [] >>= fun nb_sent ->
-             assert (nb_sent = 4);
-             Lwt.return_unit
+             if !initialized then
+               buf.[4] <- '\001';
+             Lwt_unix.send fd buf 0 5 [] >>= fun nb_sent ->
+             if nb_sent <> 5 then
+               Lwt_log.warning_f ~section "Could not send all info to %s"
+                 (Llnet.Helpers.string_of_saddr saddr)
+             else
+               Lwt.return_unit
            in
            let main_thread () =
              Llnet.connect
                ~tcp_reactor:return_oraft_ports
                ~iface (Ipaddr.of_string_exn v6addr) port >>= fun h ->
              (* Waiting for other peers to manifest themselves *)
-             Lwt_log.info "Detecting peers..." >>= fun () ->
-             Lwt_unix.sleep 2. >>= fun () ->
-             Llnet.SaddrMap.cardinal h.peers |> fun nb_peers_detected ->
-             Lwt_log.info_f "%d peers found" nb_peers_detected >>= fun () ->
-             if nb_peers_detected = 1 then
+             Lwt_log.info_f ~section "I am %s, now detecting peers..."
+               Llnet.(Helpers.string_of_saddr h.tcp_in_saddr)
+             >>= fun () ->
+             Lwt_unix.sleep (2. *. h.ival) >>= fun () ->
+             let neighbours = Llnet.neighbours_nonblock h in
+             let nb_neighbours = List.length neighbours in
+             match nb_neighbours,
+                   Llnet.order h,
+                   Llnet.neighbours_nonblock h with
+             | 0, _, _ ->
                (* We are alone, run server without joining a cluster *)
+               initialized := true;
                run_server ~addr ?join:!cluster_addr ~id:addr ()
-             else
-               Llnet.neighbours h >>= function
-               | [] -> raise_lwt (Failure "invariant do not hold")
-               | n ->
-                 let rec inner n =
-                   match n with
-                   | Unix.ADDR_UNIX _ -> raise_lwt (Failure "invariant do not hold")
-                   | Unix.ADDR_INET (a, p) ->
-                     (* Found one neighbour, asking his oraft node port *)
-                     let s_family = match Ipaddr_unix.of_inet_addr a with
-                       | V4 _ -> Unix.PF_INET
-                       | V6 _ -> Unix.PF_INET6 in
-                     let s = Lwt_unix.(socket s_family SOCK_STREAM 0) in
-                     Lwt_unix.connect s n >>= fun () ->
-                     let buf = String.make 4 '\000' in
-                     Lwt_unix.recv s buf 0 4 [] >>= fun nb_recv ->
-                     assert (nb_recv = 4);
-                     let remote_node_port = EndianString.BigEndian.get_int16 buf 0 in
-                     let remote_app_port = EndianString.BigEndian.get_int16 buf 2 in
-                     let uint16_of_int16 i16 = if i16 < 0 then i16 + 65535 else i16 in
-                     let remote_node_port = uint16_of_int16 remote_node_port in
-                     let remote_app_port = uint16_of_int16 remote_app_port in
-                     let cluster_addr =
-                       match s_family with
-                       | Unix.PF_UNIX -> assert false
-                       | Unix.PF_INET ->
-                         Printf.sprintf "%s:%d,%s:%d"
-                           (Unix.string_of_inet_addr a) remote_node_port
-                           (Unix.string_of_inet_addr a) remote_app_port
-                       | Unix.PF_INET6 ->
-                         Printf.sprintf "[%s]:%d,[%s]:%d"
-                           (Unix.string_of_inet_addr a) remote_node_port
-                           (Unix.string_of_inet_addr a) remote_app_port
-                     in
-                     Lwt_log.ign_info_f "Connecting to peer at %s" cluster_addr;
-                     run_server ~addr ?join:(Some cluster_addr) ~id:addr ()
-                 in
-                 Lwt_list.iter_s inner n
+             | _, o, ns ->
+               let rec try_joining_cluster () =
+                 Lwt_list.map_p (fun n -> get_peer_info n) ns >>= fun p_infos ->
+                 let initialized_peers =
+                   List.fold_left (fun a (addr, init) ->
+                       if init then addr::a else a) [] p_infos in
+                 match initialized_peers with
+                 | [] ->
+                   (* No peers initialized, and I'm the lowest IP, run
+                        server without joining a cluster *)
+                   if o = 0 then
+                     (
+                       initialized := true;
+                       Lwt_log.ign_info ~section "Found 0 peers initialized, running standalone";
+                       run_server ~addr ?join:!cluster_addr ~id:addr ()
+                     )
+                   else Lwt_unix.sleep (2. *. h.ival) >>= fun () ->
+                     try_joining_cluster ()
+                 | peers ->
+                   (* Some peers initialized, connecting to the first one *)
+                   Lwt_list.iter_s (fun p ->
+                       try_lwt
+                         initialized := true;
+                         Lwt_log.ign_info_f ~section "Connecting to %s" p;
+                         run_server ~addr ?join:(Some p) ~id:addr ()
+                       with exn ->
+                         initialized := false;
+                         Lwt_log.warning_f ~exn ~section
+                           "Exn raised when trying to sync to peer %s, trying others"
+                           p
+                     ) peers >>= fun () ->
+                   Lwt_unix.sleep (2. *. h.ival) >>= fun () ->
+                   try_joining_cluster ()
+               in try_joining_cluster ()
            in Lwt_main.run (main_thread ())
          | _ -> failwith "Invalid multicast address: zone id missing"
 
