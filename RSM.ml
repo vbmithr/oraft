@@ -100,9 +100,21 @@ struct
   let send_msg conn msg = send_msg Oraft_proto.Client_msg.write conn msg
   let read_msg conn     = read_msg Oraft_proto.Server_msg.read conn
 
-  let connect t peer_id addr =
+  let connect ?tls t peer_id addr =
     let do_connect () =
-      lwt fd, ich, och = Oraft_lwt.open_connection (C.app_sockaddr addr) in
+      let saddr = C.app_sockaddr addr in
+      let fd = Lwt_unix.socket (Unix.domain_of_sockaddr saddr) Unix.SOCK_STREAM 0 in
+      lwt ich, och = match tls with
+        | None -> Oraft_lwt.open_connection ~fd saddr
+        | Some client_config ->
+          Lwt_unix.connect fd saddr >>
+          lwt tls = Tls_lwt.Unix.client_of_fd ~host:"" client_config fd in
+          Lwt_io.(make ~mode:input (Tls_lwt.Unix.read_bytes tls),
+                  make ~mode:output
+                    (fun buf off len -> Tls_lwt.Unix.write_bytes tls buf off len >>
+                      Lwt.return len)
+                 ) |> Lwt.return
+      in
       let out_buf      = MB.create () in
       let in_buf       = ref "" in
       let conn         = { addr; ich; och; in_buf; out_buf } in
@@ -211,7 +223,7 @@ struct
          | Unsafe_change (c, p) -> return (`Unsafe_change (c, p))
          | Config _ -> raise_lwt Bad_response)
 
-  let connect t ~addr = connect t "" addr
+  let connect ?tls t ~addr = connect ?tls t "" addr
 end
 
 module Make_server(C : CONF) =
@@ -241,6 +253,7 @@ struct
         app_sockaddr  : Unix.sockaddr;
         serv          : 'a SS.server;
         exec          : 'a SS.apply;
+        tls           : Tls.Config.server option;
       }
 
   let raise_if_error = function
@@ -253,7 +266,7 @@ struct
     | `Cannot_change -> raise_lwt (Failure "Cannot perform config change")
     | `Unsafe_change _ -> raise_lwt (Failure "Unsafe config change")
 
-  let make exec addr ?join ?election_period ?heartbeat_period id =
+  let make exec addr ?tls ?client_tls ?join ?election_period ?heartbeat_period id =
     match join with
         None ->
           let config        = Simple_config ([id, addr], []) in
@@ -266,12 +279,13 @@ struct
           let serv          = SS.make exec ?election_period ?heartbeat_period
                                 state conn_mgr
           in
-            return { id; addr; c = None; node_sockaddr; app_sockaddr; serv; exec; }
+            return { id; addr; c = None; node_sockaddr;
+                     app_sockaddr; serv; exec; tls; }
       | Some peer_addr ->
           let c = CC.make ~id () in
             Lwt_log.info_f ~section "Connecting to %S"
               (peer_addr |> C.string_of_address) >>
-            CC.connect c ~addr:peer_addr >>
+            CC.connect ?tls:client_tls c ~addr:peer_addr >>
             lwt config        = CC.get_config c >>= raise_if_error in
             lwt ()            = Lwt_log.info_f ~section
                                   "Got initial configuration %s"
@@ -286,7 +300,7 @@ struct
                                   ?heartbeat_period state conn_mgr
             in
               return { id; addr; c = Some c;
-                       node_sockaddr; app_sockaddr; serv; exec; }
+                       node_sockaddr; app_sockaddr; serv; exec; tls; }
 
   let send_msg conn msg = send_msg Oraft_proto.Server_msg.write conn msg
   let read_msg conn     = read_msg Oraft_proto.Client_msg.read conn
