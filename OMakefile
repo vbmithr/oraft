@@ -17,6 +17,7 @@ OCAMLPACKS[] =
    extprot
    re.pcre
    llnet
+   tls.lwt
 
 if $(not $(OCAMLFIND_EXISTS))
    eprintln(This project requires ocamlfind, but is was not found.)
