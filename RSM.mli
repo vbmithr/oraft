@@ -23,7 +23,7 @@ sig
 
   val make : id:string -> unit -> t
 
-  val connect : t -> addr:address -> unit Lwt.t
+  val connect : ?tls:Tls.Config.client -> t -> addr:address -> unit Lwt.t
 
   val execute    : t -> C.op -> [ `Error of string | `OK of string ] Lwt.t
   val execute_ro : t -> C.op -> [ `Error of string | `OK of string ] Lwt.t
@@ -48,7 +48,10 @@ sig
   type 'a apply     = 'a Core.server -> C.op -> [`OK of 'a | `Error of exn] execution
 
   val make :
-    'a apply -> address -> ?join:address ->
+    'a apply -> address ->
+    ?tls:Tls.Config.server ->
+    ?client_tls:Tls.Config.client ->
+    ?join:address ->
     ?election_period:float ->
     ?heartbeat_period:float -> rep_id -> 'a t Lwt.t
 
