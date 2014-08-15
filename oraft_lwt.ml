@@ -798,10 +798,6 @@ struct
       Lwt_unix.setsockopt sock Unix.SO_REUSEADDR true;
       Lwt_unix.bind sock addr;
       Lwt_unix.listen sock 256;
-      Lwt_log.ign_info_f ~section "Running node server at %s"
-        (match addr with
-         | Unix.ADDR_INET (a, p) -> Printf.sprintf "%s/%d" (Unix.string_of_inet_addr a) p
-         | Unix.ADDR_UNIX s -> Printf.sprintf "unix://%s" s);
 
       let rec accept_loop t =
         lwt (fd, addr) = Lwt_unix.accept sock in
@@ -839,6 +835,10 @@ struct
       let t           = { id; sock; conn_signal; conns = M.empty; } in
       ignore begin
         try_lwt
+          Lwt_log.info_f ~section "Running node server at %s"
+            (match addr with
+             | Unix.ADDR_INET (a, p) -> Printf.sprintf "%s/%d" (Unix.string_of_inet_addr a) p
+             | Unix.ADDR_UNIX s -> Printf.sprintf "unix://%s" s) >>
           accept_loop t
         with
         | Exit -> return ()
@@ -860,7 +860,7 @@ struct
             await_conn ()
       | None -> (* we must connect ourselves *)
           try_lwt
-            Lwt_log.info_f ~section "Connecting to %S" addr >>
+            Lwt_log.info_f ~section "Connecting to %S" (C.string_of_address addr) >>
             let saddr = C.node_sockaddr addr in
             let fd = Lwt_unix.socket (Unix.domain_of_sockaddr saddr) Unix.SOCK_STREAM 0 in
             lwt ich, och = match tls with
