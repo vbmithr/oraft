@@ -55,9 +55,11 @@ section
 META: META.in
         sed s/VERSION/$(VERSION)/g $< > $@
 
+.PHONY: clean install uninstall
+
 install: $(LIBS) META
-	ocamlfind install oraft META \
-	$(ls *.cmi *.so *.cmxa *.cma *.a *.mli) \
+	ocamlfind remove oraft
+	ocamlfind install oraft META $(ls *.cmi *.cmxa *.cma *.a *.mli)
 
 uninstall:
 	ocamlfind remove oraft
