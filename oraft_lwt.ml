@@ -766,26 +766,10 @@ let open_tls_connection ?fd ?buffer_size ~tls sockaddr =
     | None -> Lwt_unix.socket (Unix.domain_of_sockaddr sockaddr) Unix.SOCK_STREAM 0
     | Some fd -> fd
   in
-  let close = lazy begin
-    try_lwt
-      Lwt_unix.shutdown fd Unix.SHUTDOWN_ALL;
-      return_unit
-    with Unix.Unix_error(Unix.ENOTCONN, _, _) ->
-      (* This may happen if the server closed the connection before us *)
-      return_unit
-    finally
-      Lwt_unix.close fd
-  end in
   try_lwt
     lwt () = Lwt_unix.connect fd sockaddr in
     (try Lwt_unix.set_close_on_exec fd with Invalid_argument _ -> ());
-    lwt tls = Tls_lwt.Unix.client_of_fd ~host:"" tls fd in
-    return (Lwt_io.make ~mode:Lwt_io.input ~close:(fun _ -> Lazy.force close)
-                      (Tls_lwt.Unix.read_bytes tls),
-            Lwt_io.make ~mode:Lwt_io.output ~close:(fun _ -> Lazy.force close)
-                      (fun buf off len ->
-                        Tls_lwt.Unix.write_bytes tls buf off len >>
-                        Lwt.return len))
+    Tls_lwt.(Unix.client_of_fd ~host:"" tls fd >|= of_t)
   with exn ->
     lwt () = Lwt_unix.close fd in
     raise_lwt exn
