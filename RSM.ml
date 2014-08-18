@@ -2,6 +2,7 @@ open Printf
 open Lwt
 
 open Oraft.Types
+open Oraft_util
 
 let section = Lwt_log.Section.make "RSM"
 
@@ -106,14 +107,7 @@ struct
       let fd = Lwt_unix.socket (Unix.domain_of_sockaddr saddr) Unix.SOCK_STREAM 0 in
       lwt ich, och = match tls with
         | None -> Oraft_lwt.open_connection ~fd saddr
-        | Some client_config ->
-          Lwt_unix.connect fd saddr >>
-          lwt tls = Tls_lwt.Unix.client_of_fd ~host:"" client_config fd in
-          Lwt_io.(make ~mode:input (Tls_lwt.Unix.read_bytes tls),
-                  make ~mode:output
-                    (fun buf off len -> Tls_lwt.Unix.write_bytes tls buf off len >>
-                      Lwt.return len)
-                 ) |> Lwt.return
+        | Some tls -> Oraft_lwt.open_tls_connection ~fd ~tls saddr
       in
       let out_buf      = MB.create () in
       let in_buf       = ref "" in
@@ -389,7 +383,13 @@ struct
       end;
       request_loop t client_id conn
 
+  let eprint_sexp sexp =
+    output_string stderr Sexplib.Sexp.(to_string_hum sexp) ;
+    output_string stderr "\n\n" ;
+    flush stderr
+
   let dispatch t fd addr =
+    lwt () = Lwt_log.debug ~section "Starting dispatch" in
     (* the following are not supported for ADDR_UNIX sockets, so catch *)
     (* possible exceptions  *)
     (try Lwt_unix.setsockopt fd Unix.TCP_NODELAY true with _ -> ());
@@ -397,11 +397,7 @@ struct
     lwt ich, och = match t.tls with
       | None -> Lwt_io.(of_fd input fd, of_fd output fd) |> Lwt.return
       | Some server_config ->
-        Tls_lwt.Unix.server_of_fd server_config fd >|= fun tls ->
-        Lwt_io.make ~mode:Lwt_io.input (Tls_lwt.Unix.read_bytes tls),
-        Lwt_io.make ~mode:Lwt_io.output
-          (fun buf off len -> Tls_lwt.Unix.write_bytes tls buf off len >>
-            return len)
+        Tls_lwt.(Unix.server_of_fd ~trace:eprint_sexp server_config fd >|= of_t)
     in
     let conn = { addr; ich; och; in_buf = ref ""; out_buf = MB.create () } in
       match_lwt read_msg conn with
@@ -464,22 +460,23 @@ struct
       Lwt_unix.listen sock 256;
 
       let rec accept_loop t =
-        lwt (fd, addr) = Lwt_unix.accept sock in
-          ignore
-            begin try_lwt
-              dispatch t fd addr
-            with exn ->
-              begin match exn with
-                  End_of_file
-                | Unix.Unix_error (Unix.ECONNRESET, _, _) -> return ()
-                | exn -> Lwt_log.error_f ~exn ~section "Error in dispatch"
-              end
-            finally
-              Lwt_log.info_f ~section "Client connection closed" >>
-              let () = Lwt_unix.shutdown fd Unix.SHUTDOWN_ALL in
-                Lwt_unix.close fd
-            end;
-          accept_loop t
+        lwt (fd_addrs,_) = Lwt_unix.accept_n sock 50 in
+        let handle_conn fd addr =
+          try_lwt
+            dispatch t fd addr
+          with exn ->
+            match exn with
+              | End_of_file
+              | Unix.Unix_error (Unix.ECONNRESET, _, _) ->
+                return ()
+              | exn ->
+                Lwt_log.error_f ~exn ~section "Error in dispatch"
+          (* finally *)
+          (*   safely (Lwt_log.info_f ~section "Client connection closed" >> *)
+          (*           (Lwt_unix.shutdown fd Unix.SHUTDOWN_ALL; Lwt_unix.close fd)) *)
+        in
+        List.iter (fun (fd, addr) -> Lwt.async (fun () -> handle_conn fd addr)) fd_addrs;
+        accept_loop t
       in
         ignore begin try_lwt
             Lwt_log.info_f ~section "Running app server at %s"
@@ -494,7 +491,9 @@ struct
           match t.c with
             | None -> accept_loop t
             | Some c -> join_cluster t c >> accept_loop t
+        with exn ->
+          Lwt_log.fatal ~section ~exn "Exn raised"
         finally
           (* FIXME: t.c client shutdown *)
-          Lwt_unix.close sock
+          safely (Lwt_unix.close sock)
 end

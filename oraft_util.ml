@@ -17,3 +17,6 @@ let string_of_config string_of_address c =
           (s_of_simple_config string_of_address c1)
           (s_of_simple_config string_of_address c2)
           (s_of_simple_config string_of_address passive)
+
+let safely th =
+  try_lwt (th >> Lwt.return_unit) with _ -> Lwt.return_unit

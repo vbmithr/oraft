@@ -104,6 +104,12 @@ val open_connection :
   ?buffer_size : int -> Unix.sockaddr ->
   (Lwt_io.input_channel * Lwt_io.output_channel) Lwt.t
 
+val open_tls_connection :
+  ?fd : Lwt_unix.file_descr ->
+  ?buffer_size : int ->
+  tls:Tls.Config.client -> Unix.sockaddr ->
+  (Lwt_io.input_channel * Lwt_io.output_channel) Lwt.t
+
 module Simple_server : functor(C : SERVER_CONF) ->
 sig
   include SERVER_GENERIC with type op = C.op

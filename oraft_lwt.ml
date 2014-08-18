@@ -761,6 +761,35 @@ let open_connection ?fd ?buffer_size sockaddr =
     lwt () = Lwt_unix.close fd in
     raise_lwt exn
 
+let open_tls_connection ?fd ?buffer_size ~tls sockaddr =
+  let fd = match fd with
+    | None -> Lwt_unix.socket (Unix.domain_of_sockaddr sockaddr) Unix.SOCK_STREAM 0
+    | Some fd -> fd
+  in
+  let close = lazy begin
+    try_lwt
+      Lwt_unix.shutdown fd Unix.SHUTDOWN_ALL;
+      return_unit
+    with Unix.Unix_error(Unix.ENOTCONN, _, _) ->
+      (* This may happen if the server closed the connection before us *)
+      return_unit
+    finally
+      Lwt_unix.close fd
+  end in
+  try_lwt
+    lwt () = Lwt_unix.connect fd sockaddr in
+    (try Lwt_unix.set_close_on_exec fd with Invalid_argument _ -> ());
+    lwt tls = Tls_lwt.Unix.client_of_fd ~host:"" tls fd in
+    return (Lwt_io.make ~mode:Lwt_io.input ~close:(fun _ -> Lazy.force close)
+                      (Tls_lwt.Unix.read_bytes tls),
+            Lwt_io.make ~mode:Lwt_io.output ~close:(fun _ -> Lazy.force close)
+                      (fun buf off len ->
+                        Tls_lwt.Unix.write_bytes tls buf off len >>
+                        Lwt.return len))
+  with exn ->
+    lwt () = Lwt_unix.close fd in
+    raise_lwt exn
+
 module Simple_IO(C : SERVER_CONF) =
 struct
   module EC = Extprot.Conv
@@ -810,11 +839,7 @@ struct
               | None ->
                 Lwt_io.(of_fd input fd, of_fd output fd) |> Lwt.return
               | Some server_config ->
-                Tls_lwt.Unix.server_of_fd server_config fd >|= fun tls ->
-                Lwt_io.make ~mode:Lwt_io.input (Tls_lwt.Unix.read_bytes tls),
-                Lwt_io.make ~mode:Lwt_io.output
-                  (fun buf off len -> Tls_lwt.Unix.write_bytes tls buf off len >>
-                    return len)
+                Tls_lwt.(Unix.server_of_fd server_config fd >|= of_t)
             in
             lwt id  = Lwt_io.read_line ich in
             let c   = { id; mgr = t; ich; och; closed = false;
@@ -865,14 +890,7 @@ struct
             let fd = Lwt_unix.socket (Unix.domain_of_sockaddr saddr) Unix.SOCK_STREAM 0 in
             lwt ich, och = match tls with
               | None -> open_connection ~fd saddr
-              | Some client_config ->
-                Lwt_unix.connect fd saddr >>
-                lwt tls = Tls_lwt.Unix.client_of_fd ~host:"" client_config fd in
-                Lwt_io.(make ~mode:input (Tls_lwt.Unix.read_bytes tls),
-                        make ~mode:output
-                          (fun buf off len -> Tls_lwt.Unix.write_bytes tls buf off len >>
-                            Lwt.return len)
-                       ) |> Lwt.return
+              | Some tls -> open_tls_connection ~fd ~tls saddr
             in
               try_lwt
                 (try Lwt_unix.setsockopt fd Unix.TCP_NODELAY true with _ -> ());
