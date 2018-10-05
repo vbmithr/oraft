@@ -8,19 +8,19 @@
 
 module Types :
 sig
-  type status    = Leader | Follower | Candidate
-  type term      = Int64.t
-  type index     = Int64.t
-  type rep_id    = string
-  type client_id = string
-  type req_id    = client_id * Int64.t
-  type address   = string
+  type status    = Leader | Follower | Candidate [@@deriving bin_io]
+  type term      = int64 [@@deriving bin_io]
+  type index     = int64 [@@deriving bin_io]
+  type rep_id    = string [@@deriving sexp,bin_io]
+  type client_id = string [@@deriving bin_io]
+  type req_id    = client_id * int64 [@@deriving bin_io]
+  type address   = string [@@deriving sexp,bin_io]
 
   type config =
       Simple_config of simple_config * passive_peers
     | Joint_config of simple_config * simple_config * passive_peers
   and simple_config = (rep_id * address) list
-  and passive_peers = (rep_id * address) list
+  and passive_peers = (rep_id * address) list [@@deriving sexp,bin_io]
 
   type 'a message =
       Request_vote of request_vote
@@ -28,7 +28,7 @@ sig
     | Append_entries of 'a append_entries
     | Append_result of append_result
     | Ping of ping
-    | Pong of ping
+    | Pong of ping [@@deriving bin_io]
 
   and request_vote = {
     term : term;

@@ -1,5 +1,7 @@
 open Printf
 open Lwt.Infix
+open Sexplib.Std
+open Bin_prot.Std
 
 module Map    = BatMap
 module List   = BatList
@@ -8,19 +10,19 @@ module Array  = BatArray
 
 module Kernel =
 struct
-  type status    = Leader | Follower | Candidate
-  type term      = Int64.t
-  type index     = Int64.t
-  type rep_id    = string
-  type client_id = string
-  type req_id    = client_id * Int64.t
-  type address   = string
+  type status    = Leader | Follower | Candidate [@@deriving bin_io]
+  type term      = int64 [@@deriving bin_io]
+  type index     = int64 [@@deriving bin_io]
+  type rep_id    = string [@@deriving sexp,bin_io]
+  type client_id = string [@@deriving bin_io]
+  type req_id    = client_id * int64 [@@deriving bin_io]
+  type address   = string [@@deriving sexp,bin_io]
 
   type config =
       Simple_config of simple_config * passive_peers
     | Joint_config of simple_config * simple_config * passive_peers
   and simple_config = (rep_id * address) list
-  and passive_peers = (rep_id * address) list
+  and passive_peers = (rep_id * address) list [@@deriving sexp,bin_io]
 
   module REPID = struct type t = rep_id let compare = String.compare end
   module IM = Map.Make(Int64)
@@ -358,6 +360,8 @@ struct
           if idx = t.prev_log_index then Some t.prev_log_term else None
   end
 
+  type 'a entry = Nop | Op of 'a | Config of config [@@deriving bin_io]
+
   type 'a state =
       {
         (* persistent *)
@@ -386,15 +390,13 @@ struct
         votes : RS.t;
       }
 
-  and 'a entry = Nop | Op of 'a | Config of config
-
   type 'a message =
       Request_vote of request_vote
     | Vote_result of vote_result
     | Append_entries of 'a append_entries
     | Append_result of append_result
     | Ping of ping
-    | Pong of ping
+    | Pong of ping [@@deriving bin_io]
 
   and request_vote =
       {
@@ -428,12 +430,12 @@ struct
 
   and actual_append_result =
       Append_success of index (* last log entry included in msg we respond to *)
-    | Append_failure of index
+    | Append_failure of index [@@deriving bin_io]
       (* Index of log entry preceding those in message we respond to or
        * the index following the last entry we do have.
        * *)
 
-  and ping = { term : term; n : Int64.t; }
+  and ping = { term : term; n : int64; }
 
   type 'a action =
       Apply of (index * 'a * term) list

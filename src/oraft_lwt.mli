@@ -1,4 +1,9 @@
 
+val da_write_msg :
+  Lwt_bytes.t -> int -> int -> Lwt_io.direct_access -> unit Lwt.t
+val da_read_msg :
+  Lwt_bytes.t -> int -> int -> Lwt_io.direct_access -> unit Lwt.t
+
 module type LWTIO_TYPES =
 sig
   type op
@@ -67,7 +72,7 @@ sig
       | `Retry
       | `Cannot_change
       | `Unsafe_change of simple_config * passive_peers
-      ]
+      ] [@@deriving bin_io]
 
     val get             : _ server -> config
     val add_failover    : _ server -> rep_id -> address -> result Lwt.t
@@ -83,18 +88,12 @@ module Make_server : functor(IO : LWTIO) ->
   SERVER_GENERIC with type op         = IO.op
                   and type connection = IO.connection
 
-module type OP =
-sig
-  type op
-
-  val string_of_op : op -> string
-  val op_of_string : string -> op
-end
-
 module type SERVER_CONF =
 sig
   open Oraft.Types
-  include OP
+  type op [@@deriving bin_io]
+  val string_of_op : op -> string
+  val op_of_string : string -> op
   val node_sockaddr : address -> Unix.sockaddr
   val string_of_address : address -> string
 end
@@ -127,5 +126,5 @@ sig
 
   val make_conn_manager :
     ?conn_wrapper:[`Incoming | `Outgoing] conn_wrapper ->
-    id:string -> Unix.sockaddr -> conn_manager
+    id:string -> Unix.sockaddr -> conn_manager Lwt.t
 end

@@ -1,25 +1,6 @@
-open Printf
 open Lwt.Infix
 open Oraft
 open Oraft.Types
-
-let s_of_simple_config string_of_address l =
-  List.map
-    (fun (id, addr) -> sprintf "%S:%S" id (string_of_address addr)) l |>
-  String.concat "; "
-
-let string_of_config string_of_address c =
-  match c with
-      Simple_config (c, passive) ->
-        Printf.sprintf "Simple ([%s], [%s])"
-          (s_of_simple_config string_of_address c)
-          (s_of_simple_config string_of_address passive)
-    | Joint_config (c1, c2, passive) ->
-        Printf.sprintf "Joint ([%s], [%s], [%s])"
-          (s_of_simple_config string_of_address c1)
-          (s_of_simple_config string_of_address c2)
-          (s_of_simple_config string_of_address passive)
-
 
 module Map    = BatMap
 module List   = BatList
@@ -27,6 +8,33 @@ module Option = BatOption
 module Queue  = BatQueue
 
 let section = Lwt_log.Section.make "oraft_lwt"
+
+let rec da_write_msg buf pos len (da : Lwt_io.direct_access) =
+  let avail = da.da_max - da.da_ptr in
+    if len <= avail then begin
+      Lwt_bytes.blit buf pos da.da_buffer da.da_ptr len ;
+      da.da_ptr <- da.da_ptr + len ;
+      Lwt.return_unit
+    end
+    else begin
+      Lwt_bytes.blit buf pos da.da_buffer da.da_ptr avail ;
+      da.da_ptr <- da.da_max ;
+      da.da_perform () >>= fun _nb_written ->
+      da_write_msg buf (pos + avail) (len - avail) da
+    end
+
+let rec da_read_msg buf pos len (da : Lwt_io.direct_access) =
+  if len <= 0 then Lwt.return_unit
+  else
+    let readable = da.da_max - da.da_ptr in
+      if readable = 0 then
+        da.da_perform () >>= fun _nb_read ->
+        da_read_msg buf pos len da
+      else
+        let nb_to_read = min len readable in
+          Lwt_bytes.blit da.da_buffer da.da_ptr buf pos nb_to_read ;
+          da.da_ptr <- da.da_ptr + nb_to_read ;
+          da_read_msg buf (pos + nb_to_read) (len - nb_to_read) da
 
 module REPID = struct type t = rep_id let compare = String.compare end
 module RM = Map.Make(REPID)
@@ -98,7 +106,7 @@ sig
       | `Retry
       | `Cannot_change
       | `Unsafe_change of simple_config * passive_peers
-      ]
+      ] [@@deriving bin_io]
 
     val get             : _ server -> config
     val add_failover    : _ server -> rep_id -> address -> result Lwt.t
@@ -673,7 +681,7 @@ struct
       | `Retry
       | `Cannot_change
       | `Unsafe_change of simple_config * passive_peers
-      ]
+      ] [@@deriving bin_io]
 
     let get t = Core.config t.state
 
@@ -734,17 +742,11 @@ struct
   end
 end
 
-module type OP =
-sig
-  type op
-
-  val string_of_op : op -> string
-  val op_of_string : string -> op
-end
-
 module type SERVER_CONF =
 sig
-  include OP
+  type op [@@deriving bin_io]
+  val string_of_op : op -> string
+  val op_of_string : string -> op
   val node_sockaddr : address -> Unix.sockaddr
   val string_of_address : address -> string
 end
@@ -813,12 +815,11 @@ let wrap_incoming_conn w fd = w.wrap_incoming_conn fd
 
 module Simple_IO(C : SERVER_CONF) =
 struct
-  module EC = Extprot.Conv
 
   type op = C.op
+  type msg = req_id * C.op [@@deriving bin_io]
 
   module M  = Map.Make(String)
-  module MB = Extprot.Msg_buffer
 
   let section = Lwt_log.Section.make "oraft_lwt.io"
 
@@ -838,19 +839,19 @@ struct
       ich            : Lwt_io.input_channel;
       och            : Lwt_io.output_channel;
       mutable closed : bool;
-      mutable in_buf : string;
-      out_buf        : MB.t;
+      mutable in_buf : Lwt_bytes.t;
+      out_buf        : Lwt_bytes.t;
       mutable noutgoing : int;
     }
 
   let make ?(conn_wrapper = trivial_conn_wrapper ()) ~id addr =
     let sock = Lwt_unix.(socket (Unix.domain_of_sockaddr addr) Unix.SOCK_STREAM 0) in
       Lwt_unix.setsockopt sock Unix.SO_REUSEADDR true;
-      Lwt_unix.bind sock addr;
+      Lwt_unix.bind sock addr >>= fun () ->
       Lwt_unix.listen sock 256;
 
       let rec accept_loop t =
-        let%lwt (fd, addr) = Lwt_unix.accept sock in
+        let%lwt (fd, _addr) = Lwt_unix.accept sock in
           ignore begin try%lwt
               (* the following are not supported for ADDR_UNIX sockets, so catch
                * possible exceptions *)
@@ -859,7 +860,8 @@ struct
               let%lwt ich, och = conn_wrapper.wrap_incoming_conn fd in
               let%lwt id       = Lwt_io.read_line ich in
               let c        = { id; mgr = t; ich; och; closed = false;
-                               in_buf = ""; out_buf = MB.create ();
+                               in_buf = Lwt_bytes.create 4096;
+                               out_buf = Lwt_bytes.create 4096;
                                noutgoing = 0;
                              }
               in
@@ -886,7 +888,7 @@ struct
             | exn -> Lwt_log.error_f ~exn ~section
                        "Error in connection manager accept loop"
         end;
-        t
+        Lwt.return t
 
   let connect t dst_id addr =
     match M.Exceptionless.find dst_id t.conns with
@@ -913,66 +915,17 @@ struct
                 Lwt_io.write och (t.id ^ "\n")>>= fun () ->
                 Lwt_io.flush och>>= fun () ->
                 Lwt.return (Some { id = dst_id; mgr = t; ich; och; closed = false;
-                               in_buf = ""; out_buf = MB.create ();
+                                   in_buf = Lwt_bytes.create 4096;
+                                   out_buf = Lwt_bytes.create 4096;
                                noutgoing = 0; })
               with exn ->
                 Lwt_unix.close fd>>= fun () ->
                 Lwt.fail exn
-          with _ -> return_none
+          with _ -> Lwt.return_none
 
   let is_saturated conn = conn.noutgoing > 10
 
-  open Oraft_proto
-  open Raft_message
   open Oraft
-
-  let wrap_msg : _ Oraft.Types.message -> Raft_message.raft_message = function
-      Request_vote { term; candidate_id; last_log_index; last_log_term; } ->
-        Request_vote { Request_vote.term; candidate_id;
-                       last_log_index; last_log_term; }
-    | Vote_result { term; vote_granted; } ->
-        Vote_result { Vote_result.term; vote_granted; }
-    | Ping { term; n } -> Ping { Ping_msg.term; n; }
-    | Pong { term; n } -> Pong { Ping_msg.term; n; }
-    | Append_result { term; result; } ->
-        Append_result { Append_result.term; result }
-    | Append_entries { term; leader_id; prev_log_index; prev_log_term;
-                       entries; leader_commit; } ->
-        let map_entry = function
-            (index, (Nop, term)) -> (index, Entry.Nop, term)
-          | (index, (Config c, term)) -> (index, Entry.Config c, term)
-          | (index, (Op (req_id, x), term)) ->
-              (index, Entry.Op (req_id, C.string_of_op x), term) in
-
-        let entries = List.map map_entry entries in
-          Append_entries { Append_entries.term; leader_id; prev_log_index;
-                           prev_log_term; entries; leader_commit; }
-
-  let unwrap_msg : Raft_message.raft_message -> _ Oraft.Types.message = function
-    | Request_vote { Request_vote.term; candidate_id; last_log_index;
-                     last_log_term } ->
-        Request_vote { term; candidate_id; last_log_index; last_log_term }
-    | Vote_result { Vote_result.term; vote_granted; } ->
-        Vote_result { term; vote_granted; }
-    | Ping { Ping_msg.term; n } -> Ping { term; n; }
-    | Pong { Ping_msg.term; n } -> Pong { term; n; }
-    | Append_result { Append_result.term; result; } ->
-        Append_result { term; result }
-    | Append_entries { Append_entries.term; leader_id;
-                       prev_log_index; prev_log_term;
-                       entries; leader_commit; } ->
-        let map_entry = function
-          | (index, Entry.Nop, term) -> (index, (Nop, term))
-          | (index, Entry.Config c, term) -> (index, (Config c, term))
-          | (index, Entry.Op (req_id, x), term) ->
-              let op = C.op_of_string x in
-                (index, (Op (req_id, op), term))
-        in
-          Append_entries
-            { term; leader_id; prev_log_index; prev_log_term;
-              entries = List.map map_entry entries;
-              leader_commit;
-            }
 
   let abort c =
     if c.closed then Lwt.return ()
@@ -985,21 +938,15 @@ struct
   let send c msg =
     if c.closed then Lwt.return ()
     else begin
-      let wrapped = wrap_msg msg in
-        Lwt_log.debug_f ~section
-          "Sending\n%s" (Extprot.Pretty_print.pp pp_raft_message wrapped)>>= fun () ->
+        Lwt_log.debug_f ~section "Sending" >>= fun () ->
         (try%lwt
           c.noutgoing <- c.noutgoing + 1;
-          Lwt_io.atomic
-            (fun och ->
-               MB.clear c.out_buf;
-               Raft_message.write c.out_buf wrapped;
-               Lwt_io.LE.write_int och (MB.length c.out_buf)>>= fun () ->
-               Lwt_io.write_from_exactly
-                 och (MB.unsafe_contents c.out_buf) 0 (MB.length c.out_buf)>>= fun () ->
-               Lwt_io.flush och)
-            c.och
-        with exn ->
+          Lwt_io.atomic begin fun och ->
+            let msglen = bin_write_message bin_write_msg c.out_buf ~pos:0 msg in
+              Lwt_io.LE.write_int och msglen >>= fun () ->
+              Lwt_io.direct_access och (da_write_msg c.out_buf 0 msglen)
+          end c.och
+         with exn ->
           let%lwt () = Lwt_log.info_f ~section ~exn
                      "Error on send to %s, closing connection" c.id
           in
@@ -1014,17 +961,13 @@ struct
       Lwt.return None
     else
       try%lwt
-        Lwt_io.atomic
-          (fun ich ->
-             let%lwt len = Lwt_io.LE.read_int ich in
-               if String.length c.in_buf < len
-               then c.in_buf <- Bytes.create len;
-               let%lwt ()  = Lwt_io.read_into_exactly ich c.in_buf 0 len in
-               let msg = EC.deserialize Raft_message.read c.in_buf in
-                 Lwt_log.debug_f ~section
-                   "Received\n%s" (Extprot.Pretty_print.pp pp_raft_message msg)>>= fun () ->
-                 Lwt.return (Some (unwrap_msg msg)))
-          c.ich
+        Lwt_io.atomic begin fun ich ->
+          Lwt_io.LE.read_int ich >>= fun len ->
+          Lwt_io.direct_access ich (da_read_msg c.in_buf 0 len) >>= fun () ->
+          let msg = bin_read_message bin_read_msg c.in_buf ~pos_ref:(ref 0) in
+            Lwt_log.debug_f ~section "Received MSG" >>= fun () ->
+            Lwt.return_some msg
+        end c.ich
       with exn ->
         let%lwt () = Lwt_log.info_f ~section ~exn
                    "Error on receive from %S, closing connection" c.id

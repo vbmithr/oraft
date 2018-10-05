@@ -30,8 +30,8 @@
  *
  * *)
 
-open Printf
-open Lwt
+open Lwt.Infix
+open Bin_prot.Std
 
 module String  = BatString
 module Hashtbl = BatHashtbl
@@ -40,12 +40,11 @@ module Option  = BatOption
 type op =
     Get of string
   | Wait of string
-  | Set of string * string
+  | Set of string * string [@@deriving bin_io]
 
 module CONF =
 struct
-  type op_ = op
-  type op = op_
+  type nonrec op = op [@@deriving bin_io]
 
   let string_of_op = function
       Get v -> "?" ^ v
@@ -72,14 +71,14 @@ struct
 
   let node_sockaddr s = String.split ~by:"," s |> fst |> sockaddr
   let app_sockaddr  s =
-    printf "Connecting to %s\n%!" s;
+    Printf.printf "Connecting to %s\n%!" s;
     String.split ~by:"," s |> snd |> sockaddr
 
   let string_of_address s = s
 end
 
-module SERVER = RSM.Make_server(CONF)
-module CLIENT = RSM.Make_client(CONF)
+module SERVER = Oraft_rsm.Make_server(CONF)
+module CLIENT = Oraft_rsm.Make_client(CONF)
 
 let make_tls_wrapper tls =
   Option.map
@@ -93,14 +92,14 @@ let run_server ?tls ~addr ?join ~id () =
   let cond = Lwt_condition.create () in
 
   let exec _ op = match op with
-      Get s -> `Sync (return (try `OK (Hashtbl.find h s) with Not_found -> `OK ""))
+      Get s -> `Sync (Lwt.return (try `OK (Hashtbl.find h s) with Not_found -> `OK ""))
     | Wait k ->
         `Async begin
           let rec attempt () =
             match Hashtbl.Exceptionless.find h k with
-                Some v -> return (`OK v)
+                Some v -> Lwt.return (`OK v)
               | None ->
-                  Lwt_condition.wait cond >>
+                  Lwt_condition.wait cond >>= fun () ->
                   attempt ()
           in
             attempt ()
@@ -112,11 +111,11 @@ let run_server ?tls ~addr ?join ~id () =
           Hashtbl.add h k v;
           Lwt_condition.broadcast cond ();
         end;
-        `Sync (return (`OK ""))
+        `Sync (Lwt.return (`OK ""))
   in
 
-  lwt server = SERVER.make ?conn_wrapper:(make_tls_wrapper tls) exec addr ?join id in
-    SERVER.run server
+  SERVER.make ?conn_wrapper:(make_tls_wrapper tls) exec addr ?join id >>=
+  SERVER.run
 
 let client_op ?tls ~addr op =
   let c    = CLIENT.make
@@ -126,41 +125,41 @@ let client_op ?tls ~addr op =
                | Get _ | Wait _ -> CLIENT.execute_ro
                | Set _ -> CLIENT.execute
   in
-    CLIENT.connect c ~addr >>
-    match_lwt exec c op with
-      | `OK s -> printf "+OK %s\n" s; return ()
-      | `Error s -> printf "-ERR %s\n" s; return ()
+    CLIENT.connect c ~addr >>= fun () ->
+    match%lwt exec c op with
+      | `OK s -> Printf.printf "+OK %s\n" s; Lwt.return_unit
+      | `Error s -> Printf.printf "-ERR %s\n" s; Lwt.return_unit
 
 let ro_benchmark ?tls ?(iterations = 10_000) ~addr () =
   let c    = CLIENT.make
                ?conn_wrapper:(make_tls_wrapper tls)
                ~id:(string_of_int (Unix.getpid ())) ()
   in
-    CLIENT.connect c ~addr >>
-    CLIENT.execute c (Set ("bm", "0")) >>
+    CLIENT.connect c ~addr >>= fun () ->
+    CLIENT.execute c (Set ("bm", "0")) >>= fun _result ->
     let t0 = Unix.gettimeofday () in
-      for_lwt i = 1 to iterations do
-        lwt _ = CLIENT.execute_ro c (Get "bm") in
-          return_unit
-      done >>
+      for%lwt i = 1 to iterations do
+        let%lwt _ = CLIENT.execute_ro c (Get "bm") in
+          Lwt.return_unit
+      done >>= fun () ->
       let dt = Unix.gettimeofday () -. t0 in
-        printf "%.0f RO ops/s\n" (float iterations /. dt);
-        return ()
+        Printf.printf "%.0f RO ops/s\n" (float iterations /. dt);
+        Lwt.return_unit
 
 let wr_benchmark ?tls ?(iterations = 10_000) ~addr () =
   let c    = CLIENT.make
                ?conn_wrapper:(make_tls_wrapper tls)
                ~id:(string_of_int (Unix.getpid ())) ()
   in
-    CLIENT.connect c ~addr >>
+    CLIENT.connect c ~addr >>= fun () ->
     let t0 = Unix.gettimeofday () in
-      for_lwt i = 1 to iterations do
-        lwt _ = CLIENT.execute c (Set ("bm", "")) in
-          return_unit
-      done >>
+      for%lwt i = 1 to iterations do
+        let%lwt _ = CLIENT.execute c (Set ("bm", "")) in
+          Lwt.return_unit
+      done >>= fun () ->
       let dt = Unix.gettimeofday () -. t0 in
-        printf "%.0f WR ops/s\n" (float iterations /. dt);
-        return ()
+        Printf.printf "%.0f WR ops/s\n" (float iterations /. dt);
+        Lwt.return_unit
 
 let mode         = ref `Help
 let cluster_addr = ref None
@@ -195,12 +194,13 @@ let x509_cert dirname = dirname ^ "/server.crt"
 let x509_pk dirname   = dirname ^ "/server.key"
 
 let tls_create dirname =
-  lwt ()          = Tls_lwt.rng_init () in
   let x509_cert   = x509_cert dirname in
   let x509_pk     = x509_pk dirname in
-  lwt certificate =
+  let%lwt certificate =
     X509_lwt.private_of_pems ~cert:x509_cert ~priv_key:x509_pk in
-    return (Some Tls.Config.(client (), server ~certificate ()))
+    (* FIXME: authenticator *)
+    Lwt.return (Some Tls.Config.(client ~authenticator:X509.Authenticator.null (),
+                                 server ~certificates:(`Single certificate) ()))
 
 let () =
   ignore (Sys.set_signal Sys.sigpipe Sys.Signal_ignore);
@@ -215,7 +215,7 @@ let () =
           Lwt_main.run (tls >>= fun tls ->
                         run_server ?tls ~addr ?join:!cluster_addr ~id:addr ())
       | `Client addr ->
-          printf "Launching client %d\n" (Unix.getpid ());
+          Printf.printf "Launching client %d\n" (Unix.getpid ());
           if !ro_bm_iters > 0 then
             Lwt_main.run (tls >>= fun tls ->
                           ro_benchmark ?tls ~iterations:!ro_bm_iters ~addr ());

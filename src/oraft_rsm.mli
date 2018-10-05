@@ -6,7 +6,7 @@ type config_change =
   | Decommission of rep_id
   | Demote of rep_id
   | Promote of rep_id
-  | Replace of rep_id * rep_id
+  | Replace of rep_id * rep_id [@@deriving bin_io]
 
 module type CONF =
 sig

@@ -1,7 +1,8 @@
 (library
  (name        oraft)
  (public_name oraft)
- (libraries  batteries lwt)
+ (preprocess (pps ppx_sexp_conv ppx_bin_prot))
+ (libraries  sexplib batteries lwt)
  (modules oraft)
  (flags -w -30)
  (synopsis ""))
@@ -9,16 +10,24 @@
 (library
  (name        oraft_lwt)
  (public_name oraft-lwt)
- (preprocess (pps lwt_ppx))
- (libraries  lwt.unix lwt_log oraft)
+ (preprocess (pps lwt_ppx ppx_sexp_conv ppx_bin_prot))
+ (libraries  lwt.unix lwt_log bin_prot oraft)
  (modules oraft_lwt)
  (flags -w -30)
  (synopsis ""))
 
 (library
+ (name        oraft_lwt_tls)
+ (public_name oraft-lwt-tls)
+ (preprocess (pps lwt_ppx))
+ (libraries  tls.lwt oraft_lwt)
+ (modules oraft_lwt_tls)
+ (synopsis ""))
+
+(library
  (name        oraft_rsm)
  (public_name oraft-rsm)
- (preprocess (pps lwt_ppx))
- (libraries  lwt_log lwt_ppx oraft_lwt)
+ (preprocess (pps lwt_ppx ppx_sexp_conv ppx_bin_prot))
+ (libraries  sexplib lwt_log oraft_lwt)
  (modules oraft_rsm)
  (synopsis ""))
