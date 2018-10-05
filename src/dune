@@ -1,0 +1,24 @@
+(library
+ (name        oraft)
+ (public_name oraft)
+ (libraries  batteries lwt)
+ (modules oraft)
+ (flags -w -30)
+ (synopsis ""))
+
+(library
+ (name        oraft_lwt)
+ (public_name oraft-lwt)
+ (preprocess (pps lwt_ppx))
+ (libraries  lwt.unix lwt_log oraft)
+ (modules oraft_lwt)
+ (flags -w -30)
+ (synopsis ""))
+
+(library
+ (name        oraft_rsm)
+ (public_name oraft-rsm)
+ (preprocess (pps lwt_ppx))
+ (libraries  lwt_log lwt_ppx oraft_lwt)
+ (modules oraft_rsm)
+ (synopsis ""))
