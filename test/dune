@@ -1,10 +1,10 @@
 (executable
  (name        dict)
  (public_name oraft-dict)
- (preprocess (pps lwt_ppx ppx_bin_prot))
+ (preprocess (pps lwt_ppx ppx_sexp_conv ppx_bin_prot))
  (modules    Dict)
  (package    oraft-rsm)
- (libraries  x509 bin_prot oraft_lwt_tls oraft_rsm))
+ (libraries  fmt.tty logs.fmt logs.lwt x509 bin_prot oraft_lwt_tls oraft_rsm))
 
 (executable
  (name        test_DES)

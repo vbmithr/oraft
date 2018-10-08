@@ -4,7 +4,7 @@ open Bin_prot.Std
 
 open Oraft.Types
 
-let section = Lwt_log.Section.make "RSM"
+let src = Logs.Src.create "oraft_rsm"
 
 let s_of_simple_config string_of_address l =
   List.map
@@ -42,7 +42,7 @@ let send_msg conn write msg =
    * channel across send_msg calls.  *)
   Lwt_io.atomic begin fun och ->
     let msglen = write conn.out_buf ~pos:0 msg in
-      Lwt_log.debug_f ~section "send_msg: %d bytes" msglen >>= fun () ->
+      Logs_lwt.debug ~src (fun m -> m "send_msg: %d bytes" msglen) >>= fun () ->
       Lwt_io.LE.write_int och msglen >>= fun () ->
       Lwt_io.direct_access
         och (Oraft_lwt.da_write_msg conn.out_buf 0 msglen)
@@ -52,7 +52,7 @@ let read_msg conn read =
   (* same as send_msg applies here regarding the buffers *)
   Lwt_io.atomic begin fun ich ->
     Lwt_io.LE.read_int ich >>= fun msglen ->
-    Lwt_log.debug_f ~section "read_msg: %d bytes" msglen >>= fun () ->
+    Logs_lwt.debug ~src (fun m -> m "read_msg: %d bytes" msglen) >>= fun () ->
     Lwt_io.direct_access
       ich (Oraft_lwt.da_read_msg conn.in_buf 0 msglen) >>= fun () ->
     Lwt.return (read conn.in_buf ~pos_ref:(ref 0))
@@ -155,9 +155,9 @@ struct
                 ignore begin
                   let rec loop_recv () =
                     let%lwt msg = read_msg conn in
-                      Lwt_log.debug_f ~section "<- loop_recv %s"
-                        (Sexplib.Sexp.to_string_hum
-                           (sexp_of_server_msg msg)) >>= fun () ->
+                      Logs_lwt.debug ~src begin fun m ->
+                        m "<- loop_recv %a" Sexplib.Sexp.pp_hum (sexp_of_server_msg msg)
+                      end >>= fun () ->
                       match H.Exceptionless.find t.pending_reqs msg.id with
                           None -> loop_recv ()
                         | Some u ->
@@ -192,16 +192,19 @@ struct
           let id    = gen_id t in
           let msg   = { id; op; } in
             H.add t.pending_reqs id u;
-            let msg_sexp_str = Sexplib.Sexp.to_string_hum (sexp_of_client_msg msg) in
-              Lwt_log.debug_f ~section "-> %s" msg_sexp_str >>= fun () ->
+            Logs_lwt.debug ~src begin fun m ->
+              m "-> %a" Sexplib.Sexp.pp_hum (sexp_of_client_msg msg)
+            end >>= fun () ->
               send_msg c msg >>= fun () ->
               let%lwt x = th in
                 f c.addr x
 
   let rec do_execute t op =
     send_and_await_response t op begin fun dst resp ->
-      Lwt_log.debug_f ~section "<- do_execute %s"
-        (Sexplib.Sexp.to_string_hum (sexp_of_response resp)) >>= fun () ->
+      Logs_lwt.debug ~src begin fun m ->
+        m "<- do_execute %a"
+          Sexplib.Sexp.pp_hum (sexp_of_response resp)
+      end >>= fun () ->
       match resp with
           OK s -> Lwt.return (`OK s)
         | Error s -> Lwt.return (`Error s)
@@ -305,11 +308,15 @@ struct
                          app_sockaddr; serv; exec; conn_wrapper; }
       | Some peer_addr ->
           let c = CC.make ~conn_wrapper ~id () in
-            Lwt_log.info_f ~section "Connecting to %S" (peer_addr |> C.string_of_address) >>= fun () ->
+            Logs_lwt.info ~src begin fun m ->
+              m "Connecting to %S" (peer_addr |> C.string_of_address)
+            end >>= fun () ->
             CC.connect c ~addr:peer_addr >>= fun () ->
             let%lwt config        = CC.get_config c >>= raise_if_error in
-            let%lwt ()            = Lwt_log.info_f ~section "Got initial configuration %s"
-                                  (string_of_config C.string_of_address config) in
+            let%lwt ()            = Logs_lwt.info ~src begin
+                fun m -> m "Got initial configuration %s"
+                           (string_of_config C.string_of_address config)
+              end in
             let state         = Oraft.Core.make
                                   ~id ~current_term:0L ~voted_for:None
                                   ~log:[] ~config () in
@@ -350,8 +357,9 @@ struct
         in
           Lwt.return (map ret)
       with exn ->
-        Lwt_log.debug_f ~section ~exn
-          "Error while changing cluster configuration" >>= fun () ->
+        Logs_lwt.debug ~src begin fun m ->
+          m "Error while changing cluster configuration: %a" Oraft_lwt.pp_exn exn
+        end >>= fun () ->
         Lwt.return (Error (Printexc.to_string exn))
 
   let process_message t _client_id conn = function
@@ -361,14 +369,12 @@ struct
         let config = SS.Config.get t.serv in
           send_msg conn { id; response = Config config }
     | { id; op = Change_config x } ->
-        Lwt_log.info_f ~section
-          "Config change requested" >>= fun () ->
+        Logs_lwt.info ~src (fun m -> m "Config change requested") >>= fun () ->
         let%lwt response = perform_change t x in
-          Lwt_log.info_f ~section
-            "Config change result" >>= fun () ->
-          Lwt_log.info_f ~section
-            "New config: %s"
-            (string_of_config C.string_of_address (SS.config t.serv)) >>= fun () ->
+          Logs_lwt.info ~src (fun m -> m "Config change result") >>= fun () ->
+          Logs_lwt.info ~src begin fun m ->
+            m "New config: %s" (string_of_config C.string_of_address (SS.config t.serv))
+          end >>= fun () ->
           send_msg conn { id; response }
     | { id; op = Execute_RO op; } -> begin
         match%lwt SS.readonly_operation t.serv with
@@ -387,7 +393,8 @@ struct
                       in
                         send_msg conn { id; response = map_op_result resp }
                     with exn ->
-                      Lwt_log.debug ~section ~exn "Caught exn"
+                      Logs_lwt.debug ~src
+                        (fun m -> m "Caught exn: %a" Oraft_lwt.pp_exn exn)
                     end;
                     Lwt.return_unit
       end
@@ -401,8 +408,10 @@ struct
         try%lwt
           process_message t client_id conn msg
         with exn ->
-          Lwt_log.debug_f ~section ~exn
-            "Error while processing message" >>= fun () ->
+          Logs_lwt.debug ~src begin fun m ->
+            m "Error while processing message: %a"
+              Oraft_lwt.pp_exn exn
+          end >>= fun () ->
           send_msg conn { id = msg.id; response = Error (Printexc.to_string exn) }
       end;
       request_loop t client_id conn
@@ -425,8 +434,10 @@ struct
     if is_in_config t config then
       Lwt.return_unit
     else begin
-      Lwt_log.info_f ~section "Adding failover id:%S addr:%S"
-        t.id (C.string_of_address t.addr)>>= fun () ->
+      Logs_lwt.info ~src begin fun m ->
+        m "Adding failover id:%S addr:%S"
+          t.id (C.string_of_address t.addr)
+      end >>= fun () ->
       CC.change_config c (Add_failover (t.id, t.addr)) >>= check_config_err
     end
 
@@ -434,7 +445,7 @@ struct
     if is_active t config then
       Lwt.return_unit
     else begin
-      Lwt_log.info_f ~section "Promoting failover id:%S" t.id>>= fun () ->
+      Logs_lwt.info ~src (fun m -> m "Promoting failover id:%S" t.id) >>= fun () ->
       CC.change_config c (Promote t.id) >>= check_config_err
     end
 
@@ -448,8 +459,10 @@ struct
       add_as_failover_if_needed t c config>>= fun () ->
       promote_if_needed t c config>>= fun () ->
       let%lwt config = CC.get_config c >>= raise_if_error in
-        Lwt_log.info_f ~section "Final config: %s"
-          (string_of_config C.string_of_address config)
+        Logs_lwt.info ~src begin fun m ->
+          m "Final config: %s"
+            (string_of_config C.string_of_address config)
+        end
 
   let handle_conn t fd addr =
     (* the following are not supported for ADDR_UNIX sockets, so catch *)
@@ -463,8 +476,9 @@ struct
                        out_buf = Lwt_bytes.create 4096 } in
         (match%lwt read_msg conn with
             | { id; op = Connect client_id; _ } ->
-                Lwt_log.info_f ~section
-                  "Incoming client connection from %S" client_id>>= fun () ->
+                Logs_lwt.info ~src begin fun m ->
+                  m "Incoming client connection from %S" client_id
+                end >>= fun () ->
                 send_msg conn { id; response = OK "" }>>= fun () ->
                 request_loop t client_id conn
             | { id; _ } ->
@@ -475,7 +489,8 @@ struct
       | End_of_file
       | Unix.Unix_error (Unix.ECONNRESET, _, _) -> Lwt.return_unit
       | exn ->
-          Lwt_log.error_f ~section ~exn "Error in dispatch")
+          Logs_lwt.err ~src
+            (fun m -> m "Error in dispatch: %a" Oraft_lwt.pp_exn exn))
       [%finally
         try%lwt Lwt_unix.close fd with _ -> Lwt.return_unit]
 
@@ -495,20 +510,21 @@ struct
           accept_loop t
       in
         ignore begin try%lwt
-            Lwt_log.info_f ~section "Running app server at %s"
-              (match t.app_sockaddr with
-                | Unix.ADDR_INET (a, p) -> Printf.sprintf "%s/%d" (Unix.string_of_inet_addr a) p
-                | Unix.ADDR_UNIX s -> Printf.sprintf "unix://%s" s)>>= fun () ->
+            Logs_lwt.info ~src begin fun m ->
+              m "Running app server at %a" Oraft_lwt.pp_saddr t.app_sockaddr
+            end >>= fun () ->
             SS.run t.serv
           with exn ->
-            Lwt_log.error_f ~section ~exn "Error in Oraft_lwt server run()"
+            Logs_lwt.err ~src begin fun m ->
+              m "Error in Oraft_lwt server run(): %a" Oraft_lwt.pp_exn exn
+            end
         end;
         (try%lwt
           match t.c with
             | None -> accept_loop t
             | Some c -> join_cluster t c >>= fun () -> accept_loop t
         with exn ->
-          Lwt_log.fatal ~section ~exn "Exn raised")
+          Logs_lwt.err ~src (fun m -> m "Exn raised: %a" Oraft_lwt.pp_exn exn))
           [%finally
              (* FIXME: t.c client shutdown *)
             try%lwt Lwt_unix.close sock with _ -> Lwt.return_unit]

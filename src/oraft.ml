@@ -11,11 +11,11 @@ module Array  = BatArray
 module Kernel =
 struct
   type status    = Leader | Follower | Candidate [@@deriving bin_io]
-  type term      = int64 [@@deriving bin_io]
-  type index     = int64 [@@deriving bin_io]
+  type term      = int64 [@@deriving sexp,bin_io]
+  type index     = int64 [@@deriving sexp,bin_io]
   type rep_id    = string [@@deriving sexp,bin_io]
-  type client_id = string [@@deriving bin_io]
-  type req_id    = client_id * int64 [@@deriving bin_io]
+  type client_id = string [@@deriving sexp,bin_io]
+  type req_id    = client_id * int64 [@@deriving sexp,bin_io]
   type address   = string [@@deriving sexp,bin_io]
 
   type config =
@@ -360,7 +360,7 @@ struct
           if idx = t.prev_log_index then Some t.prev_log_term else None
   end
 
-  type 'a entry = Nop | Op of 'a | Config of config [@@deriving bin_io]
+  type 'a entry = Nop | Op of 'a | Config of config [@@deriving sexp,bin_io]
 
   type 'a state =
       {
@@ -396,7 +396,7 @@ struct
     | Append_entries of 'a append_entries
     | Append_result of append_result
     | Ping of ping
-    | Pong of ping [@@deriving bin_io]
+    | Pong of ping [@@deriving sexp,bin_io]
 
   and request_vote =
       {

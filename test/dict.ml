@@ -31,6 +31,7 @@
  * *)
 
 open Lwt.Infix
+open Sexplib.Std
 open Bin_prot.Std
 
 module String  = BatString
@@ -40,11 +41,11 @@ module Option  = BatOption
 type op =
     Get of string
   | Wait of string
-  | Set of string * string [@@deriving bin_io]
+  | Set of string * string [@@deriving sexp,bin_io]
 
 module CONF =
 struct
-  type nonrec op = op [@@deriving bin_io]
+  type nonrec op = op [@@deriving sexp,bin_io]
 
   let string_of_op = function
       Get v -> "?" ^ v
@@ -201,6 +202,35 @@ let tls_create dirname =
     (* FIXME: authenticator *)
     Lwt.return (Some Tls.Config.(client ~authenticator:X509.Authenticator.null (),
                                  server ~certificates:(`Single certificate) ()))
+
+let lwt_reporter () =
+  let buf_fmt ~like =
+    let b = Buffer.create 512 in
+    Fmt.with_buffer ~like b,
+    fun () -> let m = Buffer.contents b in Buffer.reset b; m
+  in
+  let app, app_flush = buf_fmt ~like:Fmt.stdout in
+  let dst, dst_flush = buf_fmt ~like:Fmt.stderr in
+  let reporter = Logs_fmt.reporter ~app ~dst () in
+  let report src level ~over k msgf =
+    let k () =
+      let write () = match level with
+      | Logs.App -> Lwt_io.write Lwt_io.stdout (app_flush ())
+      | _ -> Lwt_io.write Lwt_io.stderr (dst_flush ())
+      in
+      let unblock () = over (); Lwt.return_unit in
+      Lwt.finalize write unblock |> Lwt.ignore_result;
+      k ()
+    in
+    reporter.Logs.report src level ~over:(fun () -> ()) k msgf;
+  in
+  { Logs.report = report }
+
+let setup_log style_renderer level =
+  Fmt_tty.setup_std_outputs ?style_renderer ();
+  Logs.set_level level;
+  Logs.set_reporter (lwt_reporter ());
+  ()
 
 let () =
   ignore (Sys.set_signal Sys.sigpipe Sys.Signal_ignore);

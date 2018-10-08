@@ -4,6 +4,9 @@ val da_write_msg :
 val da_read_msg :
   Lwt_bytes.t -> int -> int -> Lwt_io.direct_access -> unit Lwt.t
 
+val pp_exn : Format.formatter -> exn -> unit
+val pp_saddr : Format.formatter -> Unix.sockaddr -> unit
+
 module type LWTIO_TYPES =
 sig
   type op
@@ -91,7 +94,7 @@ module Make_server : functor(IO : LWTIO) ->
 module type SERVER_CONF =
 sig
   open Oraft.Types
-  type op [@@deriving bin_io]
+  type op [@@deriving sexp,bin_io]
   val string_of_op : op -> string
   val op_of_string : string -> op
   val node_sockaddr : address -> Unix.sockaddr
