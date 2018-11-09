@@ -48,11 +48,11 @@ module type SERVER = sig
   type 'a apply = 'a Core.server -> op -> ('a, exn) result Core.execution
 
   val make :
-    'a apply -> address ->
     ?conn_wrapper:[`Outgoing | `Incoming] Oraft_lwt_conn_wrapper.conn_wrapper ->
-    ?join:address ->
+    ?peers:(rep_id * address) list ->
     ?election_period:float ->
-    ?heartbeat_period:float -> rep_id -> 'a t Lwt.t
+    ?heartbeat_period:float ->
+    'a apply -> (rep_id * address) -> 'a t Lwt.t
 
   val run : string t -> unit Lwt.t
 end

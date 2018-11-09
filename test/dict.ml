@@ -5,7 +5,7 @@
  *
  * (1) Launch of 1st node (will be master with quorum = 1 at first):
  *
- *     ./dict master n1a,n1b
+ *     ./dict master n1a,n1b --peers n2a,n2b:n3a,n3b
  *         (uses UNIX domain sockets  n1a for Raft communication,
  *          n1b as address for app server -- use   ip1:port1,ip2:port2
  *          to listen at ip1:port1 for Raft, ip1:port2 for app)
@@ -14,9 +14,9 @@
  * (2) Launch extra nodes. They will join the cluster and the quorum will be
  *     updated.
  *
- *     ./dict master n2a,n2b --join n1a,n1b
+ *     ./dict master n2a,n2b --peers n1a,n1b:n3a,n3b
  *
- *     ./dict master n3a,n3b --join n1a,n1b
+ *     ./dict master n3a,n3b --peers n1a,n1b:n2a,n2b
  *
  *     ...
  *
@@ -105,7 +105,7 @@ let make_tls_wrapper tls =
          ~client_config ~server_config)
     tls
 
-let run_server ?tls ~addr ?join ~id () =
+let run_server ?tls ~peers (id, addr) =
   let h    = Hashtbl.create 13 in
   let cond = Lwt_condition.create () in
 
@@ -137,7 +137,8 @@ let run_server ?tls ~addr ?join ~id () =
   in
 
   let%lwt server =
-    Server.make ?conn_wrapper:(make_tls_wrapper tls) exec addr ?join id in
+    Server.make
+      ?conn_wrapper:(make_tls_wrapper tls) exec ~peers (id, addr) in
     Server.run server
 
 let client_op ?tls ~addr op =
@@ -230,7 +231,8 @@ let tls_create (cert, priv_key) =
     | "", "" -> Lwt.return_none
     | _ -> tls_create cert priv_key >>= Lwt.return_some
 
-let master tls addr join () =
+let master tls addr peers () =
+  let peers = List.map (fun p -> p,p) peers in
   List.iter begin fun s ->
     Sys.set_signal s begin Sys.Signal_handle begin fun _ ->
         Option.may (fun a ->
@@ -241,7 +243,7 @@ let master tls addr join () =
     end
   end Sys.[sigint ; sigterm];
   tls_create tls >>= fun tls ->
-  run_server ?tls ~addr ?join ~id:addr ()
+  run_server ?tls ~peers (addr, addr)
 
 let master_cmd =
   let listen =
@@ -249,12 +251,12 @@ let master_cmd =
       Arg.(required
            & pos 0 (some string) None
            & info [] ~docv:"ADDRESS" ~doc) in
-  let join =
+  let peers =
     let doc = "Other servers to join." in
-      Arg.(value & opt (some string) None &
-           info ["join"] ~doc ~docv:"ADDRESS") in
+      Arg.(value & opt (list ~sep:':' string) [] &
+           info ["peers"] ~doc ~docv:"ADDRESS") in
   let doc = "Launch a server" in
-    Term.(const master $ tls $ listen $ join $ setup_log),
+    Term.(const master $ tls $ listen $ peers $ setup_log),
     Term.info ~doc "master"
 
 let get_key tls addr k () =

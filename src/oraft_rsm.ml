@@ -264,25 +264,13 @@ module Make_server(C : CONF) = struct
     | Error Cannot_change -> Lwt.fail_with "Cannot perform config change"
     | Error (Unsafe_change _) -> Lwt.fail_with "Unsafe config change"
 
-  let make exec addr
+  let make
         ?(conn_wrapper = Oraft_lwt_conn_wrapper.trivial_conn_wrapper ())
-        ?join ?election_period ?heartbeat_period id =
-    begin match join with
-      | None ->
-          Lwt.return (Simple_config ([id, addr], []), None)
-      | Some peer_addr ->
-          let c = CC.make ~conn_wrapper ~id () in
-            Logs_lwt.info ~src begin fun m ->
-              m "Connecting to %S" (peer_addr |> C.string_of_address)
-            end >>= fun () ->
-            CC.connect c ~addr:peer_addr >>= fun () ->
-            CC.get_config c >>= raise_if_error >>= fun config ->
-            Logs_lwt.info ~src begin fun m ->
-              m "Got initial configuration %s"
-                (Oraft_lwt.string_of_config C.string_of_address config)
-            end >>= fun () ->
-            Lwt.return (config, Some c)
-    end >>= fun (config, c) ->
+        ?(peers=[])
+        ?election_period
+        ?heartbeat_period
+        exec ((id, addr) as self) =
+    let config = Simple_config (self :: peers, []) in
     let state         = Oraft.Core.make
                           ~id ~current_term:0L ~voted_for:None
                           ~log:[] ~config () in
@@ -291,7 +279,7 @@ module Make_server(C : CONF) = struct
     let%lwt conn_mgr  = IO.make_conn_manager ~id node_sockaddr in
     let serv          = SS.make exec ?election_period ?heartbeat_period
                           state conn_mgr in
-      Lwt.return { id; addr; c ; node_sockaddr;
+      Lwt.return { id; addr; c = None ; node_sockaddr;
                    app_sockaddr; serv; exec; conn_wrapper; }
 
   let send_msg conn msg = send_msg Server_msg.write conn msg

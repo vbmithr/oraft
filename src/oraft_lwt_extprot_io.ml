@@ -93,7 +93,7 @@ module Make(C : SERVER_CONF) = struct
             await_conn ()
       | None -> (* we must connect ourselves *)
           try%lwt
-            Logs_lwt.info ~src begin fun m ->
+            Logs_lwt.debug ~src begin fun m ->
               m "Connecting to %S" (C.string_of_address addr)
             end >>= fun () ->
             let saddr    = C.node_sockaddr addr in
@@ -116,7 +116,7 @@ module Make(C : SERVER_CONF) = struct
                 Lwt_unix.close fd >>= fun () ->
                 Lwt.fail exn
           with exn ->
-            Logs_lwt.err ~src begin fun m ->
+            Logs_lwt.debug ~src begin fun m ->
               m "Failed to connect (%s)" (Printexc.to_string exn)
             end >>= fun () ->
             Lwt.return_none
